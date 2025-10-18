@@ -9,3 +9,22 @@
 - CORS restrictions: Replicate API may block direct browser requests for security
 - server.js acts as a backend proxy, safely handling keys and requests
 - server can process files, manage uploads, and format responses before sending to browser
+
+## Architecture Change Analysis (2025-10-18)
+
+- HTML/JavaScript web approach is overengineered for core use case (record audio → transcribe → display)
+- Command-line compiled tool offers: simpler deployment, faster execution, automation capability, embeddability
+- Compared C, C++, C#, and Rust for CLI development:
+  - **C**: Too low-level, manual memory management, platform-specific audio APIs, slow prototyping (Score: 3/10)
+  - **C++**: Better than C but still verbose, complex build systems, challenging cross-compilation (Score: 6/10)
+  - **C#**: Excellent productivity, good cross-platform support via .NET, larger binaries, strong alternative (Score: 7.5/10)
+  - **Rust**: Best overall - memory safety without GC, excellent cross-compilation, modern tooling (cargo), mature audio library (cpal), production-ready (Score: 9/10)
+- **Recommendation: Rust** for optimal balance of safety, performance, cross-platform support, and long-term maintainability
+- Key Rust advantages:
+  - `cpal` crate provides excellent cross-platform audio recording
+  - `reqwest` + `serde` for HTTP/JSON (equivalent to C#'s ease)
+  - `cargo` makes dependency management and cross-compilation trivial
+  - Compile-time memory safety prevents entire classes of bugs
+  - Easy future expansion to web server mode with `axum` or `actix-web`
+- C# strong alternative if faster initial development needed (familiar syntax, Visual Studio tooling, ASP.NET Core)
+- Avoid C/C++ for this project: complexity and development time outweigh any benefits
