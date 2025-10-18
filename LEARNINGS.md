@@ -28,3 +28,24 @@
   - Easy future expansion to web server mode with `axum` or `actix-web`
 - C# strong alternative if faster initial development needed (familiar syntax, Visual Studio tooling, ASP.NET Core)
 - Avoid C/C++ for this project: complexity and development time outweigh any benefits
+
+## Rust CLI Implementation (2025-10-18)
+
+- Created command-line Rust tool for audio transcription using Replicate API
+- Uses `cpal` for cross-platform audio recording from default microphone
+- Uses `hound` to encode audio as WAV format
+- Uses `reqwest` with blocking client for HTTP API calls to Replicate
+- Secrets stored in `.env` file loaded with `dotenv` crate
+- Cross-compilation ready: supports Linux and Windows via `x86_64-pc-windows-gnu` target
+- Key implementation details:
+  - `hound::WavWriter` requires seekable writer, used temporary file approach
+  - Audio recorded to `/tmp/recording.wav` then read into memory for upload
+  - Multipart form upload with `reqwest::blocking::multipart`
+  - JSON parsing with `serde_json::Value` for flexible response handling
+  - Default 5 second recording duration, configurable via `RECORD_DURATION` env var
+- Build process:
+  - `cargo build --release` for Linux binary
+  - `rustup target add x86_64-pc-windows-gnu` to add Windows target
+  - `cargo build --release --target x86_64-pc-windows-gnu` for Windows binary
+  - Requires `mingw-w64` package for Windows cross-compilation
+
