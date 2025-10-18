@@ -10,7 +10,7 @@
   </style>
 </head>
 <body>
-  <h2>Replicate Whisper Transcription (Client-side) <span style="font-size:0.7em;color:#888;">v2</span></h2>
+  <h2>Replicate Whisper Transcription (Client-side) <span style="font-size:0.7em;color:#888;">v3</span></h2>
   <label>
     Replicate API Key:
     <input type="password" id="apiKey" size="50" placeholder="Enter your Replicate API key">
@@ -32,26 +32,70 @@
       alert('API key saved locally.');
     }
 
-    async function transcribe() {
-      const apiKey = localStorage.getItem('replicateApiKey');
-      const fileInput = document.getElementById('audioFile');
-      const output = document.getElementById('output');
-      output.textContent = '';
+    // Recording logic
+    let mediaRecorder;
+    let audioChunks = [];
+    let audioBlob;
+    const recordButton = document.getElementById('record');
+    const stopButton = document.getElementById('stop');
+    const recordStatus = document.getElementById('recordStatus');
+    const output = document.getElementById('output');
 
+    recordButton.addEventListener('click', startRecording);
+    stopButton.addEventListener('click', stopRecording);
+
+    async function startRecording() {
+      try {
+        console.log('Requesting microphone...');
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log('Microphone stream acquired:', stream);
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+        mediaRecorder.onstart = () => {
+          console.log('MediaRecorder started');
+          recordStatus.textContent = 'Recording started.';
+        };
+        mediaRecorder.ondataavailable = event => {
+          console.log('MediaRecorder dataavailable:', event);
+          audioChunks.push(event.data);
+        };
+        mediaRecorder.onstop = async () => {
+          console.log('MediaRecorder stopped');
+          audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+          recordStatus.textContent = 'Recording stopped. Uploading and transcribing...';
+          await transcribeBlob(audioBlob);
+        };
+        mediaRecorder.onerror = (e) => {
+          console.error('MediaRecorder error:', e);
+          recordStatus.textContent = 'MediaRecorder error: ' + e.error.name;
+        };
+        mediaRecorder.start();
+        recordButton.disabled = true;
+        stopButton.disabled = false;
+        recordStatus.textContent = 'Recording... Click "Stop Recording" when done.';
+        console.log('MediaRecorder started, recordButton disabled, stopButton enabled');
+      } catch (error) {
+        console.error('Error accessing microphone:', error);
+        recordStatus.textContent = 'Error accessing microphone: ' + error.message;
+      }
+    }
+
+    function stopRecording() {
+      mediaRecorder.stop();
+      recordButton.disabled = false;
+      stopButton.disabled = true;
+    }
+
+    async function transcribeBlob(blob) {
+      const apiKey = localStorage.getItem('replicateApiKey');
+      output.textContent = '';
       if (!apiKey) {
         alert('Please enter and save your Replicate API key.');
         return;
       }
-      if (!fileInput.files.length) {
-        alert('Please select an audio file.');
-        return;
-      }
-
       // Step 1: Upload file to Replicate's /v1/files endpoint
-      const file = fileInput.files[0];
       const formData = new FormData();
-      formData.append('content', file);
-
+      formData.append('content', blob, 'audio.webm');
       let fileUrl;
       try {
         const uploadRes = await fetch('https://api.replicate.com/v1/files', {
@@ -66,9 +110,8 @@
         output.textContent = 'File upload error: ' + err.message;
         return;
       }
-
       // Step 2: Start Whisper transcription prediction
-      const whisperVersion = 'openai/whisper'; // or use a custom version if needed
+      const whisperVersion = 'openai/whisper';
       try {
         const predictionRes = await fetch('https://api.replicate.com/v1/predictions', {
           method: 'POST',
@@ -84,10 +127,9 @@
         const predictionJson = await predictionRes.json();
         if (!predictionRes.ok) throw new Error(predictionJson.error || 'Prediction creation failed');
         const predictionId = predictionJson.id;
-
         // Step 3: Poll for result
         let result;
-        for (let i = 0; i < 30; i++) { // up to ~30 seconds
+        for (let i = 0; i < 30; i++) {
           await new Promise(r => setTimeout(r, 1000));
           const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
             headers: { 'Authorization': `Bearer ${apiKey}` }
