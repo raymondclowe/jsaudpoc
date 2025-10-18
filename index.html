@@ -1,157 +1,110 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Audio Transcription POC</title>
+  <meta charset="UTF-8">
+  <title>Replicate Whisper Transcription (Client-side)</title>
+  <style>
+    body { font-family: sans-serif; margin: 2em; }
+    input, button { margin: 0.5em 0; }
+    #output { white-space: pre-wrap; margin-top: 1em; }
+  </style>
 </head>
 <body>
-    <h1>Record Audio and Transcribe with Whisper</h1>
-    <button id="record">Start Recording</button>
-    <button id="stop" disabled>Stop Recording</button>
-    <p id="status">Click "Start Recording" to begin.</p>
-    <p id="transcript"></p>
+  <h2>Replicate Whisper Transcription (Client-side)</h2>
+  <label>
+    Replicate API Key:
+    <input type="password" id="apiKey" size="50" placeholder="Enter your Replicate API key">
+    <button onclick="saveKey()">Save Key</button>
+  </label>
+  <br>
+  <input type="file" id="audioFile" accept="audio/*">
+  <button onclick="transcribe()">Transcribe</button>
+  <div id="output"></div>
 
-    <script>
-        let mediaRecorder;
-        let audioChunks = [];
-        let audioBlob;
+  <script>
+    // Load API key from localStorage
+    document.getElementById('apiKey').value = localStorage.getItem('replicateApiKey') || '';
 
-        const recordButton = document.getElementById('record');
-        const stopButton = document.getElementById('stop');
-        const status = document.getElementById('status');
-        const transcript = document.getElementById('transcript');
+    function saveKey() {
+      const key = document.getElementById('apiKey').value;
+      localStorage.setItem('replicateApiKey', key);
+      alert('API key saved locally.');
+    }
 
-        recordButton.addEventListener('click', startRecording);
-        stopButton.addEventListener('click', stopRecording);
+    async function transcribe() {
+      const apiKey = localStorage.getItem('replicateApiKey');
+      const fileInput = document.getElementById('audioFile');
+      const output = document.getElementById('output');
+      output.textContent = '';
 
-        async function startRecording() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                let options = { mimeType: 'audio/webm;codecs=pcm' };
-                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                    options = {}; // fallback to default
-                }
-                mediaRecorder = new MediaRecorder(stream, options);
-                audioChunks = [];
+      if (!apiKey) {
+        alert('Please enter and save your Replicate API key.');
+        return;
+      }
+      if (!fileInput.files.length) {
+        alert('Please select an audio file.');
+        return;
+      }
 
-                mediaRecorder.ondataavailable = event => {
-                    audioChunks.push(event.data);
-                };
+      // Step 1: Upload file to Replicate's /v1/files endpoint
+      const file = fileInput.files[0];
+      const formData = new FormData();
+      formData.append('content', file);
 
-                mediaRecorder.onstop = async () => {
-                    audioBlob = await blobToWav(new Blob(audioChunks, { type: mediaRecorder.mimeType }));
-                    status.textContent = 'Recording stopped. Uploading and transcribing...';
-                    await uploadAndTranscribe();
-                };
+      let fileUrl;
+      try {
+        const uploadRes = await fetch('https://api.replicate.com/v1/files', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${apiKey}` },
+          body: formData
+        });
+        const uploadJson = await uploadRes.json();
+        if (!uploadRes.ok) throw new Error(uploadJson.error || 'File upload failed');
+        fileUrl = uploadJson.url;
+      } catch (err) {
+        output.textContent = 'File upload error: ' + err.message;
+        return;
+      }
 
-                mediaRecorder.start();
-                recordButton.disabled = true;
-                stopButton.disabled = false;
-                status.textContent = 'Recording... Click "Stop Recording" when done.';
-            } catch (error) {
-                status.textContent = 'Error accessing microphone: ' + error.message;
-            }
+      // Step 2: Start Whisper transcription prediction
+      const whisperVersion = 'openai/whisper'; // or use a custom version if needed
+      try {
+        const predictionRes = await fetch('https://api.replicate.com/v1/predictions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            version: whisperVersion,
+            input: { audio: fileUrl }
+          })
+        });
+        const predictionJson = await predictionRes.json();
+        if (!predictionRes.ok) throw new Error(predictionJson.error || 'Prediction creation failed');
+        const predictionId = predictionJson.id;
+
+        // Step 3: Poll for result
+        let result;
+        for (let i = 0; i < 30; i++) { // up to ~30 seconds
+          await new Promise(r => setTimeout(r, 1000));
+          const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
+            headers: { 'Authorization': `Bearer ${apiKey}` }
+          });
+          const pollJson = await pollRes.json();
+          if (pollJson.status === 'succeeded') {
+            result = pollJson.output;
+            break;
+          }
+          if (pollJson.status === 'failed' || pollJson.status === 'canceled') {
+            throw new Error('Transcription failed: ' + (pollJson.error || 'Unknown error'));
+          }
         }
-
-        async function stopRecording() {
-            mediaRecorder.stop();
-            recordButton.disabled = false;
-            stopButton.disabled = true;
-            // No conversion, use WebM directly
-            // audioBlob = await blobToWav(new Blob(audioChunks, { type: 'audio/webm' }));
-        }
-
-        function bufferToWave(abuffer, len) {
-            const numOfChan = abuffer.numberOfChannels;
-            const length = len * numOfChan * 2 + 44;
-            const buffer = new ArrayBuffer(length);
-            const view = new DataView(buffer);
-            const channels = [];
-            let offset = 0;
-            let pos = 0;
-
-            // write WAVE header
-            setUint32(0x46464952);                         // "RIFF"
-            setUint32(length - 8);                         // file length - 8
-            setUint32(0x45564157);                         // "WAVE"
-
-            setUint32(0x20746d66);                         // "fmt " chunk
-            setUint32(16);                                 // length = 16
-            setUint16(1);                                  // PCM (uncompressed)
-            setUint16(numOfChan);
-            setUint32(abuffer.sampleRate);
-            setUint32(abuffer.sampleRate * 2 * numOfChan); // avg. bytes/sec
-            setUint16(numOfChan * 2);                      // block-align
-            setUint16(16);                                 // 16-bit (hardcoded in this demo)
-
-            setUint32(0x61746164);                         // "data" - chunk
-            setUint32(length - pos - 4);                   // chunk length
-
-            // write interleaved data
-            for (let i = 0; i < abuffer.numberOfChannels; i++)
-                channels.push(abuffer.getChannelData(i));
-
-            while (pos < length) {
-                for (let i = 0; i < numOfChan; i++) {
-                    const sample = Math.max(-1, Math.min(1, channels[i][offset])); // clamp
-                    view.setInt16(pos, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true); // little-endian
-                    pos += 2;
-                }
-                offset++;
-            }
-
-            return new Blob([buffer], { type: 'audio/wav' });
-
-            function setUint16(data) {
-                view.setUint16(pos, data, true);
-                pos += 2;
-            }
-
-            function setUint32(data) {
-                view.setUint32(pos, data, true);
-                pos += 4;
-            }
-        }
-
-        async function blobToWav(blob) {
-            const arrayBuffer = await blob.arrayBuffer();
-            const audioContext = new AudioContext();
-            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-            const wavBlob = bufferToWave(audioBuffer, audioBuffer.length);
-            await audioContext.close();
-            return wavBlob;
-        }
-
-        async function uploadAndTranscribe() {
-            if (!audioBlob) {
-                status.textContent = 'Error: no audio to transcribe';
-                return;
-            }
-
-            try {
-                const formData = new FormData();
-                formData.append('file', audioBlob, 'audio.wav');
-
-                status.textContent = 'Uploading audio and transcribing...';
-
-                const transcribeResponse = await fetch('/transcribe', {
-                    method: 'POST',
-                    body: formData
-                });
-
-                if (!transcribeResponse.ok) {
-                    const errorText = await transcribeResponse.text();
-                    throw new Error('Transcription failed: ' + errorText);
-                }
-
-                const transcribeData = await transcribeResponse.json();
-                transcript.textContent = 'Transcript: ' + (transcribeData.text || '(empty)');
-                status.textContent = 'Transcription complete.';
-            } catch (error) {
-                status.textContent = 'Error: ' + error.message;
-            }
-        }
-    </script>
+        output.textContent = result ? (typeof result === 'string' ? result : JSON.stringify(result, null, 2)) : 'No output';
+      } catch (err) {
+        output.textContent = 'Transcription error: ' + err.message;
+      }
+    }
+  </script>
 </body>
 </html>
