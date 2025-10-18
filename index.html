@@ -17,8 +17,9 @@
     <button onclick="saveKey()">Save Key</button>
   </label>
   <br>
-  <input type="file" id="audioFile" accept="audio/*">
-  <button onclick="transcribe()">Transcribe</button>
+  <button id="record">Start Recording</button>
+  <button id="stop" disabled>Stop Recording</button>
+  <span id="recordStatus">Click "Start Recording" to begin.</span>
   <div id="output"></div>
 
   <script>
