@@ -2,3 +2,10 @@ node_modules/
 
 .env
 
+
+
+# Added by cargo
+
+/target
+Cargo.lock
+
