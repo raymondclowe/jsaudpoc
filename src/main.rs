@@ -8,6 +8,9 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+// Export wake word module for examples and library usage
+pub mod wake_word;
+
 fn record_audio(duration_secs: u64) -> Result<Vec<u8>> {
     println!("Recording audio for {} seconds...", duration_secs);
     
