@@ -34,9 +34,15 @@ fn record_audio(duration_secs: u64) -> Result<Vec<u8>> {
         sample_format: hound::SampleFormat::Int,
     };
     
-    // Use a temporary file
-    let temp_path = "/tmp/recording.wav";
-    let writer = Arc::new(Mutex::new(WavWriter::create(temp_path, spec)?));
+    // Use a platform-appropriate temporary file
+    #[cfg(target_os = "windows")]
+    let temp_dir = "C:/tmp";
+    #[cfg(not(target_os = "windows"))]
+    let temp_dir = "/tmp";
+    // Create the temp directory if it doesn't exist
+    std::fs::create_dir_all(temp_dir)?;
+    let temp_path = format!("{}/recording.wav", temp_dir);
+    let writer = Arc::new(Mutex::new(WavWriter::create(&temp_path, spec)?));
     let writer_clone = Arc::clone(&writer);
     
     let err_fn = |err| eprintln!("An error occurred on stream: {}", err);
@@ -97,66 +103,41 @@ fn record_audio(duration_secs: u64) -> Result<Vec<u8>> {
     writer.finalize()?;
     
     // Read the file back
-    let wav_data = fs::read(temp_path)?;
+        let wav_data = fs::read(&temp_path)?;
     
     // Clean up
-    fs::remove_file(temp_path).ok();
+        fs::remove_file(&temp_path).ok();
     
     Ok(wav_data)
 }
 
-fn transcribe_audio(api_key: &str, audio_data: Vec<u8>) -> Result<String> {
-    println!("Sending audio to Replicate for transcription...");
-    
+fn transcribe_audio(audio_data: Vec<u8>) -> Result<String> {
+    println!("Sending audio to local Whisper for transcription...");
     let client = reqwest::blocking::Client::new();
-    
     let part = multipart::Part::bytes(audio_data)
         .file_name("audio.wav")
         .mime_str("audio/wav")?;
-    
     let form = multipart::Form::new().part("file", part);
-    
-    let whisper_version = "vaibhavs10/incredibly-fast-whisper:3ab86df6c8f54c11309d4d1f930ac292bad43ace52d10c80d87eb258b3c9f79c";
-    let url = format!(
-        "https://api.replicate.com/v1/models/{}/predictions",
-        whisper_version
-    );
-    
-    // Use the replicate API to create prediction with multipart file
+    let url = "http://tc3.local:8085/transcribe";
     let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
+        .post(url)
         .multipart(form)
         .send()
-        .context("Failed to send request to Replicate")?;
-    
+        .context("Failed to send request to local Whisper API")?;
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().unwrap_or_default();
         return Err(anyhow::anyhow!(
-            "Replicate API error ({}): {}",
+            "Local Whisper API error ({}): {}",
             status,
             error_text
         ));
     }
-    
     let result: serde_json::Value = response.json()?;
-    
-    // Extract text from various possible response formats
-    let text = if let Some(text) = result.get("text").and_then(|v| v.as_str()) {
-        text.to_string()
-    } else if let Some(output) = result.get("output") {
-        if let Some(text) = output.get("text").and_then(|v| v.as_str()) {
-            text.to_string()
-        } else if let Some(text_str) = output.as_str() {
-            text_str.to_string()
-        } else {
-            serde_json::to_string_pretty(&output)?
-        }
-    } else {
-        "(No transcription returned)".to_string()
-    };
-    
+    let text = result.get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(No transcription returned)")
+        .to_string();
     Ok(text)
 }
 
@@ -164,28 +145,19 @@ fn main() -> Result<()> {
     // Load .env file
     dotenv().ok();
     
-    let api_key = env::var("REPLICATE_API_KEY")
-        .context("REPLICATE_API_KEY not found in environment or .env file")?;
-    
-    println!("Audio Transcription CLI");
+    println!("Audio Transcription CLI (Local Whisper)");
     println!("======================");
-    
     // Record 5 seconds of audio by default
     let duration = env::var("RECORD_DURATION")
         .ok()
         .and_then(|d| d.parse().ok())
         .unwrap_or(5);
-    
     let audio_data = record_audio(duration)?;
-    
     println!("Audio recorded: {} bytes", audio_data.len());
-    
-    let transcription = transcribe_audio(&api_key, audio_data)?;
-    
+    let transcription = transcribe_audio(audio_data)?;
     println!("\n======================");
     println!("Transcription Result:");
     println!("======================");
     println!("{}", transcription);
-    
     Ok(())
 }

@@ -340,21 +340,29 @@ fn process_audio_frame(
     // Add samples to buffer
     let mut buffer = audio_buffer.lock().unwrap();
     buffer.push(data);
-    
+
+    // Show live sound level (simple ASCII bar)
+    let rms = (data.iter().map(|x| x * x).sum::<f32>() / data.len().max(1) as f32).sqrt();
+    let bar_len = (rms * 40.0).min(40.0) as usize;
+    let bar = "|".repeat(bar_len);
+    print!("\r[{:40}] RMS: {:.3}   ", bar, rms);
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+
     // Only check every 100ms to reduce CPU usage
     if buffer.len() < sample_rate as usize / 10 {
         return;
     }
-    
+
     // Prevent rapid re-triggering
     let mut last_det = last_detection.lock().unwrap();
     if last_det.elapsed() < Duration::from_secs(3) {
         return;
     }
-    
+
     // Get samples for detection (last 1 second)
     let samples = buffer.get_samples();
-    
+
     // Run detection
     let detector = detector.lock().unwrap();
     match detector.detect(&samples) {
@@ -363,18 +371,18 @@ fn process_audio_frame(
                 *last_det = Instant::now();
                 drop(last_det);
                 drop(detector);
-                
-                println!("🎯 Wake word detected! (confidence: {:.1}%)", confidence * 100.0);
+
+                println!("\n\n🎯 Candidate detected! (confidence: {:.1}%)", confidence * 100.0);
                 println!("   Stage 1: ✓ Local pattern match successful");
-                
+
                 // Stage 2: Send to Whisper for confirmation
                 if whisper_config.endpoint.is_some() || whisper_config.api_key.is_some() {
                     println!("   Stage 2: Sending to Whisper for confirmation...");
-                    
+
                     // Get full buffer for transcription (2 seconds)
                     let transcription_samples = buffer.get_samples();
                     drop(buffer);
-                    
+
                     // Convert to WAV and transcribe
                     match create_wav_bytes(&transcription_samples, sample_rate) {
                         Ok(wav_data) => {
@@ -382,14 +390,12 @@ fn process_audio_frame(
                                 Ok(text) => {
                                     let text_lower = text.to_lowercase();
                                     let contains_wake_word = text_lower.contains("computer");
-                                    
+
                                     println!("   Stage 2: Transcription: \"{}\"", text.trim());
-                                    
+
                                     if contains_wake_word {
                                         println!("   Stage 2: ✓ Wake word CONFIRMED!");
-                                        println!();
                                         println!("🎉 WAKE WORD VERIFIED - Ready for command");
-                                        // Here you would activate command listening/processing
                                     } else {
                                         println!("   Stage 2: ✗ False positive - wake word not in transcription");
                                     }
@@ -407,13 +413,13 @@ fn process_audio_frame(
                     drop(buffer);
                     println!("   Stage 2: Confirmation disabled (no endpoint configured)");
                 }
-                
-                println!();
+
                 println!("🎤 Listening for wake word \"computer\"...");
-                println!();
             }
         }
-        Err(e) => eprintln!("Detection error: {}", e),
+        Err(e) => {
+            println!("\n[DEBUG] Detection error: {}", e);
+        }
     }
 }
 
