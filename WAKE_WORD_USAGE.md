@@ -44,9 +44,15 @@ The tool will save WAV files for each sample for review.
 See wake word detection in a realistic always-on scenario:
 
 ```bash
-# Set your Replicate API key first (optional)
+# Configure transcription service (choose one):
+
+# Option 1: Local Fast Whisper (recommended for low latency)
+echo "WHISPER_ENDPOINT=http://tc3.local:8085" >> .env
+
+# Option 2: Replicate API (cloud-based)
 echo "REPLICATE_API_KEY=your_key_here" >> .env
 
+# Run the demo
 cargo run --example wake_word_integration
 ```
 
@@ -54,7 +60,11 @@ This will:
 - Start continuous audio monitoring
 - Detect the wake word in real-time
 - Show confidence scores
-- Trigger Stage 2 confirmation (if API key is set)
+- Trigger Stage 2 confirmation using configured service
+
+**Note**: Stage 2 confirmation is automatically enabled when either `WHISPER_ENDPOINT` or `REPLICATE_API_KEY` is set. Local Fast Whisper provides much lower latency (~100-300ms vs 1-3 seconds).
+
+See [LOCAL_WHISPER_INTEGRATION.md](LOCAL_WHISPER_INTEGRATION.md) for detailed setup instructions.
 
 ## Using in Your Own Code
 

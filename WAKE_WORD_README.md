@@ -32,10 +32,15 @@ Follow the prompts to record your wake word multiple times.
 ### 3. Integrated Detection
 
 ```bash
+# Configure transcription service (local Fast Whisper or Replicate)
+echo "WHISPER_ENDPOINT=http://tc3.local:8085" >> .env
+
 cargo run --example wake_word_integration
 ```
 
-This runs continuous monitoring with wake word detection.
+This runs continuous monitoring with wake word detection and automatic Stage 2 confirmation.
+
+**New**: Supports local Fast Whisper endpoints for low-latency confirmation (~100-300ms vs 1-3s for cloud). See [LOCAL_WHISPER_INTEGRATION.md](LOCAL_WHISPER_INTEGRATION.md).
 
 ## Documentation
 

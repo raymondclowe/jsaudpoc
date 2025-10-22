@@ -13,6 +13,8 @@ use audio_transcribe_cli::wake_word::WakeWordDetector;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use dotenv::dotenv;
 use hound::{WavSpec, WavWriter};
+use reqwest::blocking::multipart;
+use serde::Deserialize;
 use std::collections::VecDeque;
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -51,6 +53,138 @@ impl AudioBuffer {
     }
 }
 
+/// Configuration for Whisper transcription service
+struct WhisperConfig {
+    endpoint: Option<String>,  // Local Fast Whisper endpoint
+    api_key: Option<String>,   // Replicate API key
+}
+
+/// Response from local Fast Whisper endpoint
+#[derive(Debug, Deserialize)]
+struct WhisperResponse {
+    text: String,
+    #[allow(dead_code)]
+    duration_s: Option<f32>,
+}
+
+/// Create WAV file bytes from audio samples
+fn create_wav_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = WavWriter::new(&mut cursor, spec)?;
+        for &sample in samples {
+            let sample_i16 = (sample * i16::MAX as f32) as i16;
+            writer.write_sample(sample_i16)?;
+        }
+        writer.finalize()?;
+    }
+    
+    Ok(cursor.into_inner())
+}
+
+/// Transcribe audio using configured Whisper service
+fn transcribe_audio(config: &WhisperConfig, audio_data: Vec<u8>) -> Result<String> {
+    if let Some(ref endpoint) = config.endpoint {
+        transcribe_local_whisper(endpoint, audio_data)
+    } else if let Some(ref api_key) = config.api_key {
+        transcribe_replicate(api_key, audio_data)
+    } else {
+        Err(anyhow::anyhow!("No transcription service configured"))
+    }
+}
+
+/// Transcribe using local Fast Whisper endpoint
+fn transcribe_local_whisper(endpoint: &str, audio_data: Vec<u8>) -> Result<String> {
+    let client = reqwest::blocking::Client::new();
+    
+    let part = multipart::Part::bytes(audio_data)
+        .file_name("audio.wav")
+        .mime_str("audio/wav")?;
+    
+    let form = multipart::Form::new().part("file", part);
+    
+    let url = format!("{}/transcribe", endpoint);
+    
+    let response = client
+        .post(&url)
+        .multipart(form)
+        .send()
+        .context("Failed to send request to local Whisper endpoint")?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "Local Whisper API error ({}): {}",
+            status,
+            error_text
+        ));
+    }
+    
+    let result: WhisperResponse = response.json()?;
+    Ok(result.text)
+}
+
+/// Transcribe using Replicate API
+fn transcribe_replicate(api_key: &str, audio_data: Vec<u8>) -> Result<String> {
+    let client = reqwest::blocking::Client::new();
+    
+    let part = multipart::Part::bytes(audio_data)
+        .file_name("audio.wav")
+        .mime_str("audio/wav")?;
+    
+    let form = multipart::Form::new().part("file", part);
+    
+    let whisper_version = "vaibhavs10/incredibly-fast-whisper:3ab86df6c8f54c11309d4d1f930ac292bad43ace52d10c80d87eb258b3c9f79c";
+    let url = format!(
+        "https://api.replicate.com/v1/models/{}/predictions",
+        whisper_version
+    );
+    
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .multipart(form)
+        .send()
+        .context("Failed to send request to Replicate")?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "Replicate API error ({}): {}",
+            status,
+            error_text
+        ));
+    }
+    
+    let result: serde_json::Value = response.json()?;
+    
+    // Extract text from various possible response formats
+    let text = if let Some(text) = result.get("text").and_then(|v| v.as_str()) {
+        text.to_string()
+    } else if let Some(output) = result.get("output") {
+        if let Some(text) = output.get("text").and_then(|v| v.as_str()) {
+            text.to_string()
+        } else if let Some(text_str) = output.as_str() {
+            text_str.to_string()
+        } else {
+            serde_json::to_string_pretty(&output)?
+        }
+    } else {
+        "(No transcription returned)".to_string()
+    };
+    
+    Ok(text)
+}
+
 fn main() -> Result<()> {
     // Load environment variables
     dotenv().ok();
@@ -61,14 +195,28 @@ fn main() -> Result<()> {
     println!();
     println!("This demo shows a two-stage wake word detection system:");
     println!("  Stage 1: Lightweight local pattern matching (MFCC + DTW)");
-    println!("  Stage 2: Whisper confirmation (if API key configured)");
+    println!("  Stage 2: Whisper confirmation");
     println!();
     
-    // Check if API key is available
+    // Check which transcription service to use
+    let whisper_endpoint = env::var("WHISPER_ENDPOINT").ok();
     let api_key = env::var("REPLICATE_API_KEY").ok();
-    if api_key.is_none() {
-        println!("⚠️  Note: REPLICATE_API_KEY not found - Stage 2 confirmation disabled");
-        println!("   Set it in .env to enable full two-stage detection");
+    
+    let stage2_enabled = whisper_endpoint.is_some() || api_key.is_some();
+    
+    if !stage2_enabled {
+        println!("⚠️  Note: Neither WHISPER_ENDPOINT nor REPLICATE_API_KEY found");
+        println!("   Stage 2 confirmation disabled - only Stage 1 detection will run");
+        println!();
+        println!("   To enable Stage 2 confirmation, set one of:");
+        println!("   - WHISPER_ENDPOINT=http://your-server:8085 (local Fast Whisper)");
+        println!("   - REPLICATE_API_KEY=your_key (Replicate API)");
+        println!();
+    } else if let Some(ref endpoint) = whisper_endpoint {
+        println!("✓ Using local Fast Whisper endpoint: {}", endpoint);
+        println!();
+    } else {
+        println!("✓ Using Replicate API for transcription");
         println!();
     }
     
@@ -112,11 +260,16 @@ fn main() -> Result<()> {
     let audio_buffer = Arc::new(Mutex::new(AudioBuffer::new(2, sample_rate as usize)));
     let detector = Arc::new(Mutex::new(detector));
     let last_detection = Arc::new(Mutex::new(Instant::now()));
+    let whisper_config = Arc::new(WhisperConfig {
+        endpoint: whisper_endpoint,
+        api_key,
+    });
     
     // Clone for audio callback
     let audio_buffer_clone = Arc::clone(&audio_buffer);
     let detector_clone = Arc::clone(&detector);
     let last_detection_clone = Arc::clone(&last_detection);
+    let whisper_config_clone = Arc::clone(&whisper_config);
     
     // Error callback
     let err_fn = |err| eprintln!("Audio stream error: {}", err);
@@ -131,6 +284,7 @@ fn main() -> Result<()> {
                     &audio_buffer_clone,
                     &detector_clone,
                     &last_detection_clone,
+                    &whisper_config_clone,
                     sample_rate,
                 );
             },
@@ -141,6 +295,7 @@ fn main() -> Result<()> {
             let audio_buffer_clone = Arc::clone(&audio_buffer);
             let detector_clone = Arc::clone(&detector);
             let last_detection_clone = Arc::clone(&last_detection);
+            let whisper_config_clone = Arc::clone(&whisper_config);
             
             device.build_input_stream(
                 &config.into(),
@@ -154,6 +309,7 @@ fn main() -> Result<()> {
                         &audio_buffer_clone,
                         &detector_clone,
                         &last_detection_clone,
+                        &whisper_config_clone,
                         sample_rate,
                     );
                 },
@@ -178,6 +334,7 @@ fn process_audio_frame(
     audio_buffer: &Arc<Mutex<AudioBuffer>>,
     detector: &Arc<Mutex<WakeWordDetector>>,
     last_detection: &Arc<Mutex<Instant>>,
+    whisper_config: &Arc<WhisperConfig>,
     sample_rate: u32,
 ) {
     // Add samples to buffer
@@ -197,7 +354,6 @@ fn process_audio_frame(
     
     // Get samples for detection (last 1 second)
     let samples = buffer.get_samples();
-    drop(buffer); // Release lock
     
     // Run detection
     let detector = detector.lock().unwrap();
@@ -211,9 +367,47 @@ fn process_audio_frame(
                 println!("🎯 Wake word detected! (confidence: {:.1}%)", confidence * 100.0);
                 println!("   Stage 1: ✓ Local pattern match successful");
                 
-                // Stage 2: Would send to Whisper here
-                println!("   Stage 2: Confirmation would be sent to Whisper");
-                println!("   (Skipped in demo - set REPLICATE_API_KEY to enable)");
+                // Stage 2: Send to Whisper for confirmation
+                if whisper_config.endpoint.is_some() || whisper_config.api_key.is_some() {
+                    println!("   Stage 2: Sending to Whisper for confirmation...");
+                    
+                    // Get full buffer for transcription (2 seconds)
+                    let transcription_samples = buffer.get_samples();
+                    drop(buffer);
+                    
+                    // Convert to WAV and transcribe
+                    match create_wav_bytes(&transcription_samples, sample_rate) {
+                        Ok(wav_data) => {
+                            match transcribe_audio(whisper_config, wav_data) {
+                                Ok(text) => {
+                                    let text_lower = text.to_lowercase();
+                                    let contains_wake_word = text_lower.contains("computer");
+                                    
+                                    println!("   Stage 2: Transcription: \"{}\"", text.trim());
+                                    
+                                    if contains_wake_word {
+                                        println!("   Stage 2: ✓ Wake word CONFIRMED!");
+                                        println!();
+                                        println!("🎉 WAKE WORD VERIFIED - Ready for command");
+                                        // Here you would activate command listening/processing
+                                    } else {
+                                        println!("   Stage 2: ✗ False positive - wake word not in transcription");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("   Stage 2: Transcription error: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("   Stage 2: WAV creation error: {}", e);
+                        }
+                    }
+                } else {
+                    drop(buffer);
+                    println!("   Stage 2: Confirmation disabled (no endpoint configured)");
+                }
+                
                 println!();
                 println!("🎤 Listening for wake word \"computer\"...");
                 println!();
