@@ -12,3 +12,4 @@ Cargo.lock
 
 # Wake word training samples
 wake_word_sample_*.wav
+rustup-init.exe
